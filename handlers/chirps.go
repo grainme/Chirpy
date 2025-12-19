@@ -27,7 +27,7 @@ type chirpsParams struct {
 }
 
 func (cfg *ApiConfig) HandlerGetChirpById(w http.ResponseWriter, r *http.Request) {
-	chirpUUID, err := uuid.Parse(r.PathValue("chirpId"))
+	chirpUUID, err := uuid.Parse(r.PathValue("chirpID"))
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, fmt.Sprintf("%s", err))
 		return
@@ -47,9 +47,49 @@ func (cfg *ApiConfig) HandlerGetChirpById(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func (cfg *ApiConfig) HandlerDeleteChirpById(w http.ResponseWriter, r *http.Request) {
+	header := strings.Fields(r.Header.Get("Authorization"))
+	if len(header) < 2 {
+		respondWithError(w, http.StatusUnauthorized, "Bearer token is missing")
+		return
+	}
+
+	bearerToken := header[1]
+	userID, err := auth.ValidateJWT(bearerToken, cfg.JWTSecretToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, fmt.Sprintf("%v", err))
+		return
+	}
+
+	chirpID, err := uuid.Parse(r.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, http.StatusForbidden, fmt.Sprintf("%s", err))
+		return
+	}
+
+	chirp, err := cfg.Db.GetChirpById(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, fmt.Sprintf("Couldn't get chirp: %v", err))
+		return
+	}
+
+	if chirp.UserID != userID {
+		respondWithError(w, http.StatusForbidden, fmt.Sprintf("You can't delete this chirp: %v", err))
+		return
+	}
+
+	err = cfg.Db.DeleteChirpById(r.Context(), chirpID)
+	if err != nil {
+		respondWithError(w, http.StatusForbidden, fmt.Sprintf("%s", err))
+		return
+	}
+	respondWithJson(w, http.StatusNoContent, nil)
+}
+
 func (cfg *ApiConfig) HandlerGetAllChirps(w http.ResponseWriter, r *http.Request) {
 	chirps, err := cfg.Db.GetAllChirps(r.Context())
 	if err != nil {
+		log.Printf("Failed to fetch all chirps: %v", err)
 		respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("%s", err))
 		return
 	}
@@ -78,9 +118,10 @@ func (cfg *ApiConfig) HandlerValidateAndSaveChirp(w http.ResponseWriter, r *http
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
+
 	userID, err := auth.ValidateJWT(bearerToken, cfg.JWTSecretToken)
 	if err != nil {
-		log.Printf("failed to validate JWT token: %v", err)
+		log.Printf("%v", err)
 		respondWithError(w, http.StatusUnauthorized, "Unauthorized to proceed with the request")
 		return
 	}

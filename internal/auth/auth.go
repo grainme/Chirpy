@@ -2,7 +2,10 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -127,4 +130,13 @@ func GetBearerToken(headers http.Header) (string, error) {
 	// Authorization: Bearer ${jwtToken}
 	bearerToken := header[1]
 	return bearerToken, nil
+}
+
+func MakeRefreshToken() (string, error) {
+	token := make([]byte, 32)
+	_, err := rand.Read(token)
+	if err != nil {
+		return "", fmt.Errorf("Read from rand failed: %v", err)
+	}
+	return hex.EncodeToString(token), nil
 }

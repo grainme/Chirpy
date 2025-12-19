@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -12,16 +13,16 @@ import (
 )
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
-	JWTtoken  string    `json:"token"`
+	ID           uuid.UUID `json:"id"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Email        string    `json:"email"`
+	JWTtoken     string    `json:"token"`
+	RefreshToken string    `json:"refresh_token"`
 }
 type parameters struct {
-	Email            string         `json:"email"`
-	Password         string         `json:"password"`
-	ExpiresInSeconds *time.Duration `json:"expires_in_seconds"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
 }
 
 func (cfg *ApiConfig) HandlerUserLogin(w http.ResponseWriter, r *http.Request) {
@@ -42,26 +43,37 @@ func (cfg *ApiConfig) HandlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defaultExpiry := time.Hour
-	if params.ExpiresInSeconds == nil {
-		params.ExpiresInSeconds = &defaultExpiry
-	} else if *params.ExpiresInSeconds > time.Hour {
-		params.ExpiresInSeconds = &defaultExpiry
-	}
-
-	token, err := auth.MakeJWT(user.ID, cfg.JWTSecretToken, *params.ExpiresInSeconds)
+	token, err := auth.MakeJWT(user.ID, cfg.JWTSecretToken, time.Hour)
 	if err != nil {
 		log.Printf("Could not make JWT Token: %v", err)
 		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
 		return
 	}
 
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		log.Printf("Could not generate Refresh Token: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+	refreshTokenCreated, err := cfg.Db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(time.Hour * 24 * 60),
+	})
+	if err != nil {
+		log.Printf("Could not store Refresh Token: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
 	respondWithJson(w, http.StatusOK, User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
-		JWTtoken:  token,
+		ID:           user.ID,
+		CreatedAt:    user.CreatedAt,
+		UpdatedAt:    user.UpdatedAt,
+		Email:        user.Email,
+		JWTtoken:     token,
+		RefreshToken: refreshTokenCreated.Token,
 	})
 }
 
@@ -100,6 +112,56 @@ func (cfg *ApiConfig) HandlerInsertUser(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (cfg *ApiConfig) HandlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	var params parameters
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		log.Printf("%v", err)
+		respondWithError(w, http.StatusUnauthorized, "Email and password not found")
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(params.Password)
+	if err != nil {
+		log.Printf("Password hashing failed: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't hash user's password")
+		return
+	}
+
+	authorizationValue := strings.Fields(r.Header.Get("Authorization"))
+	if len(authorizationValue) < 2 {
+		log.Printf("Authorization header: %v", authorizationValue)
+		respondWithError(w, http.StatusUnauthorized, "Bearer token not provided")
+		return
+	}
+
+	bearerToken := authorizationValue[1]
+	userID, err := auth.ValidateJWT(bearerToken, cfg.JWTSecretToken)
+	if err != nil {
+		log.Printf("%v", err)
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate JWT")
+		return
+	}
+
+	updatedUser, err := cfg.Db.UpdateUser(r.Context(), database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashedPassword,
+		ID:             userID,
+	})
+	if err != nil {
+		log.Printf("%v", err)
+		respondWithError(w, http.StatusInternalServerError, "Couldn't update user")
+		return
+	}
+
+	respondWithJson(w, http.StatusOK, User{
+		ID:        updatedUser.ID,
+		CreatedAt: updatedUser.CreatedAt,
+		UpdatedAt: updatedUser.UpdatedAt,
+		Email:     updatedUser.Email,
+	})
+}
+
 func (cfg *ApiConfig) HandlerReset(w http.ResponseWriter, r *http.Request) {
 	if cfg.Platform != "dev" {
 		respondWithError(w, http.StatusForbidden, "This is not permissible in a non-dev env")
@@ -114,4 +176,54 @@ func (cfg *ApiConfig) HandlerReset(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Hits reset to 0 and database reset to initial state."))
+}
+
+func (cfg *ApiConfig) HandlerRefresh(w http.ResponseWriter, r *http.Request) {
+	authorizationValue := strings.Fields(r.Header.Get("Authorization"))
+	if len(authorizationValue) < 2 {
+		log.Printf("Authorization header: %v", authorizationValue)
+		respondWithError(w, http.StatusBadRequest, "Bearer token not provided")
+		return
+	}
+
+	bearerToken := authorizationValue[1]
+	refreshTokenRow, err := cfg.Db.GetRefreshToken(r.Context(), bearerToken)
+	if err != nil || refreshTokenRow.ExpiresAt.Before(time.Now()) || refreshTokenRow.RevokedAt.Valid {
+		log.Printf("Refresh token not found or expired: %v", authorizationValue)
+		respondWithError(w, http.StatusUnauthorized, "Refresh token not found or expired")
+		return
+	}
+
+	newJWT, err := auth.MakeJWT(refreshTokenRow.UserID, cfg.JWTSecretToken, time.Hour)
+	if err != nil {
+		log.Printf("Could not make JWT Token: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Something went wrong")
+		return
+	}
+
+	token := struct {
+		Token string `json:"token"`
+	}{
+		Token: newJWT,
+	}
+	respondWithJson(w, http.StatusOK, token)
+}
+
+func (cfg *ApiConfig) HandlerRevoke(w http.ResponseWriter, r *http.Request) {
+	authorizationValue := strings.Fields(r.Header.Get("Authorization"))
+	if len(authorizationValue) < 2 {
+		log.Printf("Authorization header: %v", authorizationValue)
+		respondWithError(w, http.StatusBadRequest, "Bearer token not provided")
+		return
+	}
+
+	bearerToken := authorizationValue[1]
+	err := cfg.Db.UpdateRefreshToken(r.Context(), bearerToken)
+	if err != nil {
+		log.Printf("Could not update refresh token: %v", authorizationValue)
+		respondWithError(w, http.StatusInternalServerError, "Could not update refresh token")
+		return
+	}
+
+	respondWithJson(w, http.StatusNoContent, nil)
 }
