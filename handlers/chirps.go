@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -87,11 +88,27 @@ func (cfg *ApiConfig) HandlerDeleteChirpById(w http.ResponseWriter, r *http.Requ
 }
 
 func (cfg *ApiConfig) HandlerGetAllChirps(w http.ResponseWriter, r *http.Request) {
-	chirps, err := cfg.Db.GetAllChirps(r.Context())
-	if err != nil {
-		log.Printf("Failed to fetch all chirps: %v", err)
-		respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("%s", err))
-		return
+	var chirps []database.Chirp
+	var err error
+
+	author_id := r.URL.Query().Get("author_id")
+	sort_type := r.URL.Query().Get("sort")
+
+	if author_id != "" {
+		userId, err := uuid.Parse(author_id)
+		if err != nil {
+			log.Printf("Failed to fetch all chirps: %v", err)
+			respondWithError(w, http.StatusInternalServerError, "Could not parse userID into UUID format")
+			return
+		}
+		chirps, err = cfg.Db.GetChirpByUserId(r.Context(), userId)
+	} else {
+		chirps, err = cfg.Db.GetAllChirps(r.Context())
+		if err != nil {
+			log.Printf("Failed to fetch all chirps: %v", err)
+			respondWithError(w, http.StatusInternalServerError, fmt.Sprintf("%s", err))
+			return
+		}
 	}
 
 	chirpsMapped := make([]chirpsParams, 0, len(chirps))
@@ -102,6 +119,16 @@ func (cfg *ApiConfig) HandlerGetAllChirps(w http.ResponseWriter, r *http.Request
 			UpdatedAt: chirp.UpdatedAt,
 			Body:      chirp.Body,
 			UserID:    chirp.UserID,
+		})
+	}
+
+	if sort_type == "desc" {
+		sort.Slice(chirpsMapped, func(i, j int) bool {
+			return chirpsMapped[i].CreatedAt.After(chirpsMapped[j].CreatedAt)
+		})
+	} else {
+		sort.Slice(chirpsMapped, func(i, j int) bool {
+			return chirpsMapped[i].CreatedAt.Before(chirpsMapped[j].CreatedAt)
 		})
 	}
 	respondWithJson(w, http.StatusOK, chirpsMapped)

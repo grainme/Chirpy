@@ -28,6 +28,11 @@ func main() {
 		log.Fatalf("couldn't read .env files: %s", err)
 	}
 
+	polkaKey := os.Getenv("POLKA_KEY")
+	if polkaKey == "" {
+		log.Fatal("POLKA_KEY must be set")
+	}
+
 	secretToken := os.Getenv("JWT_SecretToken")
 	if secretToken == "" {
 		log.Fatal("JWT_SecretToken must be set")
@@ -54,6 +59,7 @@ func main() {
 		Db:             dbQueries,
 		Platform:       platform,
 		JWTSecretToken: secretToken,
+		PolkaKey:       polkaKey,
 	}
 
 	mux := http.NewServeMux()
@@ -70,6 +76,7 @@ func main() {
 	mux.HandleFunc("POST /api/login", apiCfg.HandlerUserLogin)
 	mux.HandleFunc("POST /api/refresh", apiCfg.HandlerRefresh)
 	mux.HandleFunc("POST /api/revoke", apiCfg.HandlerRevoke)
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.HandlerUpgradeUser)
 
 	server := &http.Server{
 		Handler: mux,

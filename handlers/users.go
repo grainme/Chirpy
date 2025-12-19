@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -19,6 +21,7 @@ type User struct {
 	Email        string    `json:"email"`
 	JWTtoken     string    `json:"token"`
 	RefreshToken string    `json:"refresh_token"`
+	IsChirpyRed  bool      `json:"is_chirpy_red"`
 }
 type parameters struct {
 	Email    string `json:"email"`
@@ -74,6 +77,7 @@ func (cfg *ApiConfig) HandlerUserLogin(w http.ResponseWriter, r *http.Request) {
 		Email:        user.Email,
 		JWTtoken:     token,
 		RefreshToken: refreshTokenCreated.Token,
+		IsChirpyRed:  user.IsChirpyRed,
 	})
 }
 
@@ -105,10 +109,11 @@ func (cfg *ApiConfig) HandlerInsertUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	respondWithJson(w, http.StatusCreated, User{
-		ID:        dbData.ID,
-		CreatedAt: dbData.CreatedAt,
-		UpdatedAt: dbData.UpdatedAt,
-		Email:     dbData.Email,
+		ID:          dbData.ID,
+		CreatedAt:   dbData.CreatedAt,
+		UpdatedAt:   dbData.UpdatedAt,
+		Email:       dbData.Email,
+		IsChirpyRed: dbData.IsChirpyRed,
 	})
 }
 
@@ -155,10 +160,11 @@ func (cfg *ApiConfig) HandlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	respondWithJson(w, http.StatusOK, User{
-		ID:        updatedUser.ID,
-		CreatedAt: updatedUser.CreatedAt,
-		UpdatedAt: updatedUser.UpdatedAt,
-		Email:     updatedUser.Email,
+		ID:          updatedUser.ID,
+		CreatedAt:   updatedUser.CreatedAt,
+		UpdatedAt:   updatedUser.UpdatedAt,
+		Email:       updatedUser.Email,
+		IsChirpyRed: updatedUser.IsChirpyRed,
 	})
 }
 
@@ -222,6 +228,53 @@ func (cfg *ApiConfig) HandlerRevoke(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		log.Printf("Could not update refresh token: %v", authorizationValue)
 		respondWithError(w, http.StatusInternalServerError, "Could not update refresh token")
+		return
+	}
+
+	respondWithJson(w, http.StatusNoContent, nil)
+}
+
+func (cfg *ApiConfig) HandlerUpgradeUser(w http.ResponseWriter, r *http.Request) {
+	header := r.Header.Get("Authorization")
+	apiKey := strings.Fields(header)
+	if len(apiKey) < 2 {
+		respondWithError(w, http.StatusUnauthorized, "Api key not found")
+		return
+	}
+	if strings.TrimSpace(apiKey[1]) != cfg.PolkaKey {
+		respondWithError(w, http.StatusUnauthorized, "Api key mismatch")
+		return
+	}
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	var params parameters
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&params); err != nil {
+		log.Printf("%v", err)
+		respondWithError(w, http.StatusUnauthorized, "Email and password not found")
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		respondWithJson(w, http.StatusNoContent, nil)
+		return
+	}
+
+	_, err := cfg.Db.UpgradeUser(r.Context(), params.Data.UserId)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Printf("Couldn't find user: %v", err)
+			respondWithError(w, http.StatusNotFound, "Couldn't find user")
+			return
+		}
+		log.Printf("Could not upgrade user's membership: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Could not upgrade user's membership")
 		return
 	}
 
